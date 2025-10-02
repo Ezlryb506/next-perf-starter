@@ -7,18 +7,21 @@ export type Product = {
 }
 
 export async function getProductsPage({ q, cursor, limit = 20 }:{ q: string; cursor: string|null; limit?: number }) {
-  const params: any[] = []
+  const params: Array<string | number | Date> = []
   let where = ''
   if (q) {
     params.push(`%${q}%`)
     where += ` AND name ILIKE $${params.length} `
   }
-  let cursorClause = ''
-  if (cursor) {
-    const [createdAt, id] = cursor.split('_')
-    params.push(createdAt, Number(id))
-    cursorClause = ` AND (created_at, id) < ($${params.length-1}, $${params.length}) `
-  }
+
+  const cursorClause = (() => {
+    if (!cursor) return ''
+    const tokens = parseCursor(cursor)
+    if (!tokens) return ''
+    params.push(tokens.createdAt, tokens.id)
+    return ` AND (created_at, id) < ($${params.length-1}, $${params.length}) `
+  })()
+
   params.push(limit)
   const sql = `
     SELECT id, name, created_at
@@ -32,16 +35,32 @@ export async function getProductsPage({ q, cursor, limit = 20 }:{ q: string; cur
   const rows = (await query<Product>(sql, params)).rows
 
   // next cursor
-  const nextCursor = rows.length
-    ? `${rows[rows.length-1].created_at}_${rows[rows.length-1].id}`
-    : null
+  const lastRow: Product | null = rows.length > 0 ? rows[rows.length - 1] ?? null : null
+  const nextCursor = lastRow ? `${new Date(lastRow.created_at).toISOString()}_${lastRow.id}` : null
 
   // For total (rough), avoid COUNT(*) over entire table if q is empty on large tables in real systems;
   // Here it's fine for demo.
-  const total = (await query<{ count: number }>(
+  const totalResult = await query<{ count: number }>(
     `SELECT COUNT(*)::int AS count FROM products ${q ? 'WHERE name ILIKE $1' : ''}`,
     q ? [`%${q}%`] : []
-  )).rows[0].count
+  )
+  const total = totalResult.rows[0]?.count ?? 0
 
   return { items: rows, nextCursor, total }
+}
+
+type ParsedCursor = { createdAt: Date; id: number }
+
+function parseCursor(raw: string): ParsedCursor | null {
+  const parts = raw.split('_')
+  if (parts.length !== 2) return null
+  const [createdAtRaw, idRaw] = parts
+  if (!createdAtRaw || !idRaw) return null
+
+  // Validate createdAtRaw is not empty before creating Date
+  if (!createdAtRaw.trim()) return null
+  const createdAt = new Date(createdAtRaw)
+  const id = Number(idRaw)
+  if (Number.isNaN(createdAt.getTime()) || Number.isNaN(id)) return null
+  return { createdAt, id }
 }
